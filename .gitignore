@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+package/
+function.zip
+test*.py
+tests/
+.ruff_cache/
+*.jpg
+.env
+.env.*
+.aws/
