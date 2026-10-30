@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Frame — Manara image studio</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="header"><a class="brand" href="./" aria-label="Frame home"><span class="mark">f.</span> frame<span class="brand-note">/ an image pipeline</span></a><span class="project-tag">MANARA · AWS SAA</span></header>
+  <main>
+    <section class="intro">
+      <p class="eyebrow">SMALL UPLOAD. BIG POSSIBILITIES.</p>
+      <h1>Your images,<br><em>ready for the world.</em></h1>
+      <p class="lede">One original. Two perfectly sized, watermarked images.<br>Processed serverlessly. Delivered from the edge.</p>
+    </section>
+    <div class="workspace">
+      <section class="studio" aria-labelledby="upload-title">
+        <div class="section-heading"><h2 id="upload-title">01 <span>The original</span></h2><span class="tiny">UP TO 10 MiB</span></div>
+        <form id="upload-form">
+          <label class="dropzone" id="dropzone" for="file">
+            <input type="file" id="file" accept="image/jpeg,image/png,image/webp" required>
+            <span class="upload-symbol" aria-hidden="true">↥</span>
+            <strong id="file-label">Drop something beautiful here</strong>
+            <span id="file-detail">or choose an image · JPEG, PNG, WebP</span>
+          </label>
+          <img id="preview" class="preview" alt="Selected original" hidden>
+          <label class="token-label" for="token">Demo access token <span>Kept in memory, never saved</span></label>
+          <input class="token" id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your private demo token" required minlength="32" maxlength="512">
+          <button class="primary" id="submit" type="submit">Process image <span aria-hidden="true">↗</span></button>
+          <p class="privacy">Use non-sensitive demo images. Output links are shareable: anyone with a link can view the result. Originals stay private.</p>
+        </form>
+      </section>
+      <aside class="journey" aria-labelledby="journey-title">
+        <div class="section-heading"><h2 id="journey-title">02 <span>Behind the frame</span></h2><span class="live-indicator">EVENT-DRIVEN</span></div>
+        <ol class="steps" id="steps">
+          <li data-stage="upload"><span class="step-dot">1</span><div><strong>A safe landing</strong><p>Direct upload to private S3 storage.</p></div><span class="service">S3</span></li>
+          <li data-stage="queue"><span class="step-dot">2</span><div><strong>Room to breathe</strong><p>A resilient queue absorbs the busy moments.</p></div><span class="service">SQS</span></li>
+          <li data-stage="process"><span class="step-dot">3</span><div><strong>A little transformation</strong><p>Validate, resize, watermark, and store.</p></div><span class="service">LAMBDA</span></li>
+          <li data-stage="done"><span class="step-dot">4</span><div><strong>Out into the world</strong><p>Two image sizes, served from the edge.</p></div><span class="service">CDN</span></li>
+        </ol>
+        <div class="status-box" aria-live="polite" aria-atomic="true"><span class="tiny" id="status-heading">STUDIO STATUS</span><p id="status">Choose an image to begin.</p><code id="job-id"></code></div>
+        <p class="workflow-note">ORCHESTRATED WITH AWS STEP FUNCTIONS<br>Retries built in. No servers to manage.</p>
+      </aside>
+    </div>
+    <section class="results" id="results" hidden aria-labelledby="results-title">
+      <div class="section-heading"><h2 id="results-title">03 <span>The finished frames</span></h2><span class="tiny">JPEG · METADATA REMOVED</span></div>
+      <div class="result-grid" id="result-grid"></div>
+    </section>
+    <section class="specs"><div><span>320 × 320</span><p>Thumbnail bounds</p></div><div><span>1920 × 1920</span><p>Large image bounds</p></div><div><span>Same proportions.</span><p>No stretching. No upscaling.</p></div><div><span>Privacy, considered.</span><p>EXIF and GPS metadata removed.</p></div></section>
+  </main>
+  <footer><span>FRAME / BUILT FOR MANARA</span><span>S3 → SQS → STEP FUNCTIONS → CLOUDFRONT</span></footer>
+</body>
+</html>

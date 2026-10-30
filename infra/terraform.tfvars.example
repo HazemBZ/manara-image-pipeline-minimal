@@ -1,0 +1,7 @@
+aws_profile        = "manara"
+aws_region         = "us-east-1"
+project_name       = "manara-images"
+watermark_text     = "Manara"
+notification_email = "" # Optional. Confirm the SNS subscription email after deploying.
+enable_waf         = false # Paid CloudFront rate limiting; not an API Gateway WAF.
+# token_sha256 is generated separately by scripts/setup_token.py.

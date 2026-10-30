@@ -1,221 +1,239 @@
-# Serverless Image Processing Pipeline
+# Frame — Serverless Image Processing
 
-**AWS Solutions Architect Associate — Graduation Project 2**
+An AWS Solutions Architect Associate graduation project for Manara (Project 2).
+Upload an image, follow its progress, and receive a thumbnail and a large watermarked JPEG,
+delivered through CloudFront. No EC2 instances, NAT Gateways, or always-running containers.
 
-A minimal, event-driven image processing application using Amazon S3, Amazon SQS,
-and AWS Lambda. Upload an image to a private source bucket; Lambda resizes it, adds
-a watermark, and saves a JPEG in a separate private output bucket.
+**Branches:** `main` contains this full implementation. For the compact S3 → SQS → Lambda
+submission, see the [`minimal` branch](https://github.com/HazemBZ/manara-image-pipeline-minimal/tree/minimal).
 
-**Deployment status:** source-code submission; no live AWS deployment or endpoint is provided.
-Reviewers can run the image processor locally without AWS credentials, or follow the deployment
-walkthrough to evaluate the complete event-driven flow in their own AWS account.
+## Deployment status
 
-## Repository contents
+**Source-code submission; not deployed.** No live endpoint is provided. Local implementation
+checks, Terraform validation/planning, and AWS state-machine definition validation have passed;
+the complete deployed flow has not been verified. Reviewers can preview the frontend locally or
+follow the deployment instructions in their own AWS account to evaluate the complete application.
 
-- `app.py` — image processing and SQS-triggered Lambda handler.
-- `requirements.txt` — pinned Pillow dependency for the Lambda deployment package.
-- `README.md` — architecture, setup, evaluation instructions, and limitations.
-
-## Diagram
+## Architecture
 
 ```mermaid
-flowchart LR
-    You[Manual upload] --> Input[Private S3 source]
-    Input --> Queue[SQS Standard queue]
-    Queue --> Lambda[One Python Lambda / Pillow]
-    Input -->|Read original| Lambda
-    Lambda --> Output[Private S3 output]
-    Output --> Download[Manual download]
-    Queue -->|After 3 failed deliveries| DLQ[SQS dead-letter queue]
+flowchart TB
+    User[Browser / demo token] --> CDN[CloudFront / HTTPS]
+    CDN --> Web[Private S3 / static frontend]
+    User --> API[API Gateway HTTP API / throttled]
+    API --> Auth[Lambda token authorizer]
+    API --> Upload[Lambda / upload grant and job status]
+    Upload --> DB[(DynamoDB / job metadata and TTL)]
+    Upload -. five-minute presigned POST .-> User
+    User -->|Direct image upload| Source[Private S3 source / versioned]
+    Source -->|ObjectCreated| Queue[SQS / encrypted upload queue]
+    Queue --> Dispatcher[Lambda / idempotent dispatcher]
+    Queue -->|After five unsuccessful deliveries| DLQ[SQS dead-letter queue]
+    Dispatcher --> DB
+    Dispatcher --> Workflow
+    subgraph Workflow[Step Functions / Standard]
+        Validate[Validate] --> Resize[Resize] --> Watermark[Watermark] --> Store[Store]
+    end
+    Source -->|Pinned object version| Validate
+    Source --> Resize
+    Resize --> Internal[Private S3 / internal intermediates]
+    Internal --> Watermark
+    Watermark --> Internal
+    Internal --> Store
+    Store --> Dest[Private S3 / images prefix]
+    Store --> DB
+    Workflow --> SNS[SNS / completion or failure]
+    Dest -->|OAC / images only| CDN
+    Workflow -. timeout or abort .-> Events[EventBridge recovery rule]
+    Events --> Recovery[Lambda / mark unfinished job failed]
+    Recovery --> DB
+    Recovery --> SNS
+    Metrics[CloudWatch / logs and alarms] --> SNS
 ```
 
-### What it does
+The diagram is editable Mermaid in this README; GitHub renders it directly. For the processing
+sequence, see [docs/workflow.mmd](docs/workflow.mmd).
 
-- Upload a static JPEG, PNG, or WebP under `uploads/` in the source bucket.
-- Make **one** watermarked JPEG, fitting within 1280 × 1280 without stretching or upscaling.
-- Store it under `processed/` in a different private bucket. `uploads/cat.png` becomes
-  `processed/cat.png.jpg`. Keeping the original extension avoids name collisions.
-- Reject inputs over 5 MiB, 16 megapixels, or animated images. Strip EXIF/GPS metadata.
-- Retry failed queue messages, then move them to the DLQ. Inspect errors in Lambda logs.
+### Request lifecycle
 
-**Scope and limitations:** use a different filename for every upload. There is no database,
-progress tracking, source version pinning, or per-user access model. Duplicate notifications
-rewrite the same output path. If you overwrite an input before it is processed, the latest
-object may be processed instead. Keep uploads to a small, trusted demo; do not upload secrets.
+1. The user supplies a private demo token. A Lambda authorizer checks its SHA-256 hash.
+2. `POST /uploads` creates an `AWAITING_UPLOAD` job and returns a presigned S3 POST valid
+   for five minutes, constrained to one key, MIME type, and exact file size.
+3. The browser uploads directly to S3. Image bytes never pass through API Gateway.
+4. S3 sends an event to SQS. The dispatcher pins the source **version ID** in DynamoDB and starts
+   a Standard execution named after the job. Duplicate events do not create duplicate workflows.
+5. Four Lambda tasks validate the image, resize both variants, watermark them, and copy the
+   finished files into the publishable prefix. Only then does the job become `COMPLETED`.
+6. The frontend polls `GET /jobs/{job_id}` and displays the CloudFront result links.
+7. SNS publishes a small success/failure message. An optional email subscriber receives it after
+   subscription confirmation. No original filenames or image contents are put into notifications.
 
-This implementation focuses on the assignment's core S3 → SQS → Lambda → S3 flow.
-Step Functions, API Gateway, DynamoDB, CloudFront, and SNS are intentionally outside its scope.
-Uploads and downloads use the AWS console or CLI; there is no public frontend or API.
+## Features and limits
 
-## Local evaluation — no AWS account required
+- JPEG, PNG, and WebP input; maximum **10 MiB** and **20 megapixels** (application limits).
+- Static images only; animated files and MIME-spoofed/corrupt images are rejected.
+- Thumbnail: fits **320 × 320**. Large: fits **1920 × 1920**. Aspect ratio preserved, no upscaling.
+- Both outputs are JPEG; transparency is flattened onto white, EXIF/GPS metadata removed.
+- Configurable text watermark; default `Manara`.
+- Source object versioning prevents an overwritten upload from silently changing a running job.
+- SQS retries, partial-batch failure handling, DLQ, SDK retries, Step Functions transient retries.
+- Whole-execution timeouts/aborts are handled by an EventBridge recovery rule.
+- Scoped IAM roles per function, encrypted storage/queues/notifications, HTTPS-only buckets,
+  Block Public Access, disabled S3 ACLs, and CloudFront Origin Access Control.
+- CloudWatch logs/alarms; optional paid CloudFront WAF rate rule.
 
-Requires Python 3.12 or newer. Clone the repository, enter its directory, then run:
+**Access/privacy:** this is a restricted single-group demo, not a multi-user product. The upload
+and status API require the shared token. Anyone who holds that token can query any known job ID.
+The frontend itself and processed images are publicly viewable through CloudFront; output IDs
+are random, but an unguessable URL is **not** authorization. Originals and intermediates are never
+exposed through CloudFront. Use only non-sensitive demonstration images. A production/private
+variant should add Cognito, per-user ownership, CloudFront signed URLs, and stronger abuse controls.
+
+## Repository layout
+
+```text
+frontend/            Static upload page (plain HTML/CSS/JS, no build step)
+src/pipeline/        API, authorizer, dispatcher, image tasks
+infra/               Terraform infrastructure and locked AWS provider
+scripts/build.py     Build handler ZIP + Linux/Python 3.13 dependency layer
+scripts/setup_token.py  Local demo-token generation (hash only deployed)
+docs/                Design decisions, sequence diagram, operations/demo guide
+```
+
+## Local setup
+
+Requires Python 3.12+, pip, Node.js (syntax check only), AWS CLI v2, and Terraform 1.10+.
+The Lambda runtime is Python 3.13/x86_64; the layer builder downloads matching Linux wheels
+even when the local Python version is different. No Docker daemon is required for the build.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt boto3
+python -m pip install -e .
+node --check frontend/app.js
+python scripts/build.py
 ```
 
-Place a supported image named `photo.png` in the directory, then process it locally:
+Runtime dependencies and their transitive versions are pinned in `requirements-lambda.txt`.
+Build hashes go in `build/manifest.json`. Artifacts, state, tokens, and local configuration
+are git-ignored. Only source, dependency definitions, and reviewer documentation are published.
+
+For a UI-only preview:
 
 ```bash
-python -c 'from pathlib import Path; from app import process_image; Path("output.jpg").write_bytes(process_image(Path("photo.png").read_bytes()))'
+python -m http.server 8765 --bind 127.0.0.1 --directory frontend
 ```
 
-Open `output.jpg`. Expected result: the original proportions are preserved, neither side exceeds
-1280 pixels, and a `Manara` watermark appears near the lower-right corner. A smaller image is
-not enlarged. Transparent areas become white; original EXIF/GPS metadata is not copied.
+Visit `http://127.0.0.1:8765`. It clearly reports that the backend is not deployed; it does not
+pretend to process files locally. Production `config.json` is created by Terraform, not committed.
 
-The local command performs only the image transformation. It does not call AWS, use credentials,
-or exercise S3/SQS delivery. For negative evaluation, pass an invalid file or a file larger than
-5 MiB to `process_image`; it raises an exception rather than producing an output.
+## Deploy
 
-`boto3` is needed locally because `app.py` imports it, but AWS clients are created only when the
-Lambda handler processes an S3 event. Lambda's Python runtime already includes boto3, so it is
-not bundled in `requirements.txt`.
+Deployment creates billable resources. Set an AWS budget/alerts first and review
+[cost and security decisions](docs/decisions.md). Alerts do not stop spending.
+The full implementation includes recurring KMS, monitoring, and backup costs even when idle;
+use the `minimal` branch for the smaller demonstration architecture.
 
-## AWS deployment walkthrough
+1. Verify the intended identity and region (never use root keys):
 
-Requires an AWS account, permission to create the listed resources and IAM role, and the AWS
-CLI only if using the command-line evaluation steps. Use your own authenticated AWS profile.
-Create all resources in the same region (for example, `us-east-1`). Deployment incurs charges;
-review the cost section before starting. The following steps use the AWS console:
+   ```bash
+   aws sts get-caller-identity --profile YOUR_PROFILE
+   aws configure get region --profile YOUR_PROFILE
+   ```
 
-1. **Two S3 buckets:** one for inputs, one for outputs. Keep Block Public Access enabled,
-   ACLs disabled, and default SSE-S3 encryption. Add lifecycle expiration rules: source after
-   1 day, outputs after 7 days. Do not enable versioning for this disposable demo.
-2. **Two SQS Standard queues:** a work queue and a DLQ. Keep SQS-managed encryption enabled.
-   Set the work queue's visibility timeout to 180 seconds, retention to 1 day, and redrive policy
-   to the DLQ after 3 receives. Give the DLQ 7-day retention. In its redrive allow policy,
-   allow only the work queue to use this DLQ.
-3. **S3 → SQS:** in the work queue access policy, allow `s3.amazonaws.com` to `sqs:SendMessage`
-   only from the input bucket ARN and your account ID (example below). In the input bucket's
-   event notifications, send all object-created events with prefix `uploads/` to the work queue.
-4. **One Lambda:** Python 3.13, x86_64, 512 MB, 30-second timeout, handler `app.handler`.
-   Upload the package described below. Set `SOURCE_BUCKET` and `OUTPUT_BUCKET` environment
-   variables to your bucket names. Set its CloudWatch log retention to 1 day.
-5. **Lambda execution role:** trust `lambda.amazonaws.com`; attach `AWSLambdaBasicExecutionRole`
-   for logs, plus the scoped data policy below. No developer credentials inside the function.
-6. **SQS trigger:** connect the work queue to Lambda, batch size 1, maximum concurrency 2.
-   Enable **Report batch item failures**. Without it, Lambda could acknowledge a failed job.
-7. **Demo:** upload a small image to `uploads/example.png`, then check the output bucket and
-   download `processed/example.png.jpg`. A text file uploaded to the same prefix should fail
-   and eventually appear in the DLQ. Do not repeatedly retry invalid files by hand.
+2. Build and configure:
 
-Replace `REGION`, `ACCOUNT_ID`, `INPUT_BUCKET`, `OUTPUT_BUCKET`, and `WORK_QUEUE` below.
+   ```bash
+   python scripts/build.py
+   python scripts/setup_token.py
+   cp infra/terraform.tfvars.example infra/terraform.tfvars
+   ```
 
-Work queue resource policy:
+   Edit `infra/terraform.tfvars` for your own `aws_profile`, region, project name, watermark,
+   and optional notification email. The default region is `us-east-1`. Keep WAF disabled unless
+   its additional cost has been approved. Its rate limit applies to CDN traffic, **not** the
+   directly accessed API; the API has separate authentication and throttling.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Service": "s3.amazonaws.com"},
-    "Action": "sqs:SendMessage",
-    "Resource": "arn:aws:sqs:REGION:ACCOUNT_ID:WORK_QUEUE",
-    "Condition": {
-      "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::INPUT_BUCKET"},
-      "StringEquals": {"aws:SourceAccount": "ACCOUNT_ID"}
-    }
-  }]
-}
+3. Review and deploy:
+
+   ```bash
+   terraform -chdir=infra init
+   terraform -chdir=infra fmt -check
+   terraform -chdir=infra validate
+   terraform -chdir=infra plan -out=../build/deployment.tfplan
+   terraform -chdir=infra apply ../build/deployment.tfplan
+   terraform -chdir=infra output
+   ```
+
+   CloudFront propagation takes time. The deployment principal needs permissions to manage
+   project S3, Lambda, API Gateway, IAM, DynamoDB, SQS, SNS, KMS, Step Functions, EventBridge,
+   and CloudWatch resources; WAF permissions are needed only when enabled. Scoped runtime
+   roles are created by Terraform, rather than reusing your developer credentials.
+
+4. Confirm the SNS subscription email, if one was configured. The pipeline still publishes
+   notifications without an email subscriber, but no email is delivered.
+
+5. Open the `website_url` output and paste the contents of `.secrets/demo-token` into the
+   access-token input. Do not show the token in screenshots, terminal recordings, or GitHub.
+
+6. Evaluate the deployed application:
+
+   - Upload a non-sensitive JPEG, PNG, or WebP through the frontend and note the displayed job ID.
+   - Wait for completion, then open both output links. Verify thumbnail/large size limits,
+     preserved proportions, the watermark, and removal of original EXIF/GPS metadata.
+   - In Step Functions, find the execution named after the job ID and inspect its four processing
+     stages. The corresponding DynamoDB item should be `COMPLETED` with image dimensions.
+   - For the failure path, upload a corrupt, nonempty file with a `.png` extension. The workflow
+     should mark the job `FAILED`; inspect its validation error in the execution history/logs.
+     This deliberately failed execution may trigger an alarm. It should not put a message on
+     the ingestion DLQ: invalid **image content** is handled inside the workflow; the DLQ is
+     for messages that cannot be **dispatched** after retries.
+   - If email was configured and confirmed, verify the completion/failure notification.
+
+### Token rotation
+
+Run `python scripts/setup_token.py --rotate`, review a fresh plan, and apply. The old token
+stops working after the authorizer update; clients must use the new token. No token is
+embedded in the frontend or Terraform state (the SHA-256 hash is stored there).
+
+### API
+
+Both endpoints require `Authorization: Bearer <demo-token>`.
+
+```http
+POST /uploads
+Content-Type: application/json
+
+{"content_type":"image/png","size":12345}
 ```
 
-Lambda role inline data policy:
+Returns `201` with `job_id`, `upload.url`, `upload.fields`, and `expires_in`. Submit those
+fields as multipart form data, with the file field last, to the S3 URL.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::INPUT_BUCKET/uploads/*"},
-    {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::OUTPUT_BUCKET/processed/*"},
-    {
-      "Effect":"Allow",
-      "Action":["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],
-      "Resource":"arn:aws:sqs:REGION:ACCOUNT_ID:WORK_QUEUE"
-    }
-  ]
-}
+```http
+GET /jobs/<32-character-job-id>
 ```
 
-For **each** bucket, apply the following HTTPS-only bucket policy, replacing `BUCKET_NAME`
-with that bucket's name. Both buckets must remain private:
+Returns `AWAITING_UPLOAD`, `QUEUED`, `PROCESSING`, `COMPLETED`, or `FAILED`. Completed responses
+include metadata and output image URLs. Expired metadata is treated as absent even before
+DynamoDB asynchronously deletes it. An expired upload grant has an `upload_expired` hint.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Deny",
-    "Principal": "*",
-    "Action": "s3:*",
-    "Resource": ["arn:aws:s3:::BUCKET_NAME", "arn:aws:s3:::BUCKET_NAME/*"],
-    "Condition": {"Bool": {"aws:SecureTransport": "false"}}
-  }]
-}
-```
+## Operations and cleanup
 
-### Package for Lambda (local build only, not deployment)
+See [docs/runbook.md](docs/runbook.md) for failure handling, DLQ redrive, the demo checklist,
+and cleanup. Defaults retain original versions about 7 days, intermediates about 1 day,
+and results/metadata about 30 days. Lifecycle/TTL deletion is asynchronous, not an exact deadline;
+cached results may remain at the edge for up to a day after an origin object is removed.
 
-Pillow contains native code. Package Linux/Python 3.13 wheels, not your desktop's installed Pillow.
-Run from this directory in your virtual environment. Use a fresh, empty `package/` directory:
+Buckets refuse deletion while nonempty by default. **Destroying infrastructure does not
+replace a deliberate decision about deleting image data.** Save needed data before cleanup.
+Terraform state is local for this single-developer demo. Protect it and back it up privately;
+use a private encrypted remote backend with locking before collaborating.
 
-```bash
-python -m pip install --target package --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 3.13 --implementation cp --abi cp313 -r requirements.txt
-cp app.py package/
-```
+## Review scope
 
-Zip the **contents** of `package/`, with `app.py` at the ZIP root, and upload that ZIP to Lambda.
-For example, on Linux/macOS with the `zip` utility:
-
-```bash
-cd package
-zip -qr ../function.zip .
-cd ..
-```
-
-Lambda already includes boto3, so only Pillow is bundled. No layer, container image, or build service.
-
-## Evaluate the deployed pipeline
-
-Replace `YOUR_PROFILE`, `INPUT_BUCKET`, and `OUTPUT_BUCKET` with your own values:
-
-```bash
-aws s3 cp photo.png s3://INPUT_BUCKET/uploads/photo.png --profile YOUR_PROFILE
-aws s3 ls s3://OUTPUT_BUCKET/processed/ --profile YOUR_PROFILE
-aws s3 cp s3://OUTPUT_BUCKET/processed/photo.png.jpg result.jpg --profile YOUR_PROFILE
-```
-
-Processing is asynchronous. Repeat the list command after a short interval if the result is
-not present yet. Open `result.jpg` and check its dimensions and watermark.
-
-To evaluate failure handling, upload a plain text file under `uploads/` with a new filename.
-Lambda logs the error; after three failed receives the message moves to the DLQ. This takes
-multiple visibility-timeout intervals. A valid job should not enter the DLQ.
-
-If no output appears, check the Lambda log group and trigger status, confirm the bucket
-environment variables, and verify the queue policy and execution role. Error messages identify
-the failed SQS message. Repair configuration errors before redriving DLQ messages. If the
-original image has already expired, upload it again under a new key instead of redriving.
-
-## Cost considerations
-
-This design avoids databases, customer-managed KMS keys, paid alarms, load balancers, and
-provisioned compute. Keep the evaluation to a few small images and remove resources afterward.
-There is no public upload endpoint; bucket access requires AWS authorization.
-
-**No fixed cost or Free Tier eligibility is guaranteed.**
-S3 storage/requests/downloads, Lambda execution, SQS polling/requests, and CloudWatch logs can
-still incur charges, including idle queue polling. Stop/remove the SQS trigger when not testing.
-Lifecycle cleanup is asynchronous. Budget alerts are delayed and do not stop spending.
-Before deployment, check current pricing and account eligibility:
-[S3](https://aws.amazon.com/s3/pricing/), [Lambda](https://aws.amazon.com/lambda/pricing/),
-[SQS](https://aws.amazon.com/sqs/pricing/), [CloudWatch](https://aws.amazon.com/cloudwatch/pricing/).
-
-## Cleanup — only when intentionally removing the demo
-
-Remove the Lambda's SQS trigger first. After saving any wanted images, empty and delete the
-two project buckets, delete both queues and the Lambda, then its dedicated role and log group.
-Do not remove unrelated resources. Check billing afterward; this folder does not create resources
-or budget alerts on its own.
+This branch includes the full architecture, application source, infrastructure definition,
+dependency packaging, and operational documentation. The Mermaid architecture diagram above
+and [processing sequence](docs/workflow.mmd) are editable in the repository. No live deployment
+or recorded demonstration is claimed; the instructions above describe how a reviewer can
+deploy and evaluate the application in their own account.

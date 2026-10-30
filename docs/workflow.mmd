@@ -1,0 +1,42 @@
+sequenceDiagram
+    actor User
+    participant UI as Static frontend
+    participant API as HTTP API + token authorizer
+    participant S3 as Private source S3
+    participant Q as SQS
+    participant Dispatch as Dispatcher Lambda
+    participant DB as DynamoDB
+    participant SF as Standard Step Functions
+    participant Tasks as Image task Lambdas
+    participant Dest as Private result S3
+    participant SNS as SNS notifications
+    participant CDN as CloudFront
+    User->>UI: Select image and provide demo token
+    UI->>API: POST /uploads (MIME, exact size)
+    API->>DB: Create AWAITING_UPLOAD job
+    API-->>UI: Five-minute presigned POST + job ID
+    UI->>S3: Upload original directly
+    S3->>Q: ObjectCreated with version ID
+    Q->>Dispatch: Batched, at-least-once delivery
+    Dispatch->>DB: Pin one source version; set QUEUED
+    Dispatch->>SF: StartExecution (name = job ID)
+    Note over Dispatch,SF: Stable name and input make retries idempotent
+    SF->>Tasks: Validate
+    Tasks->>S3: Read pinned version
+    Tasks->>DB: PROCESSING + extracted dimensions
+    SF->>Tasks: Resize thumbnail and large image
+    Tasks->>Dest: Write private intermediates
+    SF->>Tasks: Watermark
+    Tasks->>Dest: Read/write intermediates
+    SF->>Tasks: Store
+    Tasks->>Dest: Copy final JPEGs into images prefix
+    Tasks->>DB: Set COMPLETED
+    SF->>SNS: Publish completion
+    loop Every three seconds until terminal state
+        UI->>API: GET /jobs/job_id
+        API->>DB: Consistent read
+        API-->>UI: Job status (output URLs when complete)
+    end
+    UI->>CDN: GET output images
+    CDN->>Dest: OAC-signed origin request (cache miss only)
+    CDN-->>UI: Cached JPEGs
